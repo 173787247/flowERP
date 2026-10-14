@@ -275,26 +275,56 @@ def stale_stock_count_is_blocked() -> str:
         tmp.cleanup()
 
 def sales_credit_and_atomic_reservation() -> str:
-    tmp = tempfile.TemporaryDirectory(prefix="flowerp-eval-sales-")
-    try:
-        store = ERPStore(Path(tmp.name) / "eval.db")
-        from flowerp.identity import IdentityService
-        IdentityService(store).ensure_local_defaults()
-        master = MasterDataService(store); inventory = InventoryService(store); sales = SalesService(store)
-        product = master.create_product(SYSTEM_PRINCIPAL, "EVAL-S", "销售验收商品", 1000, 500)
-        customer = master.create_customer(SYSTEM_PRINCIPAL, "EVAL-CUS", "验收客户", credit_limit_cents=100000)
-        inventory.receive(SYSTEM_PRINCIPAL, product["id"], "LOC-MAIN-STOCK", 2, "sales-opening")
-        order = sales.create_order(SYSTEM_PRINCIPAL, customer["id"], [{"product_id": product["id"], "quantity": 3}])
-        sales.confirm(SYSTEM_PRINCIPAL, order["id"])
-        try:
-            sales.reserve(SYSTEM_PRINCIPAL, order["id"])
-        except InsufficientStock:
-            balance = inventory.balance(SYSTEM_PRINCIPAL, product["id"], "LOC-MAIN-STOCK")
-            assert balance["reserved"] == 0 and balance["available"] == 2
-            return "正式销售订单缺货时整单回滚，没有部分预占"
-        raise AssertionError("正式销售订单超卖未被阻断")
-    finally:
-        tmp.cleanup()
+    import sqlite3
+    from flowerp.identity import IdentityService
+
+    tables = ("stock_balance", "stock_reservations", "sales_document_lines", "sales_documents")
+    for mode in ("success", "shortage", "second_write_failure"):
+        with tempfile.TemporaryDirectory(prefix="flowerp-eval-sales-") as directory:
+            store = ERPStore(Path(directory) / "eval.db")
+            IdentityService(store).ensure_local_defaults()
+            master, inventory, sales = MasterDataService(store), InventoryService(store), SalesService(store)
+            products = [master.create_product(SYSTEM_PRINCIPAL, "EVAL-" + sku, sku, 1000, 500) for sku in ("A", "B")]
+            customer = master.create_customer(SYSTEM_PRINCIPAL, "EVAL-CUS", "验收客户", credit_limit_cents=100000)
+            for index, product in enumerate(products):
+                quantity = 2 if mode == "shortage" and index == 1 else 5
+                inventory.receive(SYSTEM_PRINCIPAL, product["id"], "LOC-MAIN-STOCK", quantity, f"sales-opening-{index}")
+            order = sales.create_order(SYSTEM_PRINCIPAL, customer["id"], [
+                {"product_id": products[0]["id"], "quantity": 2},
+                {"product_id": products[1]["id"], "quantity": 3},
+            ])
+            sales.confirm(SYSTEM_PRINCIPAL, order["id"])
+            before = {table: store.rows(f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+            if mode == "second_write_failure":
+                with store.connect() as connection:
+                    product_id = products[1]["id"].replace("'", "''")
+                    connection.execute(
+                        "CREATE TRIGGER eval_second_reservation BEFORE INSERT ON stock_reservations "
+                        f"WHEN NEW.product_id='{product_id}' BEGIN "
+                        "SELECT RAISE(ABORT, 'Eval injected second reservation failure'); END"
+                    )
+            error = None
+            try:
+                sales.reserve(SYSTEM_PRINCIPAL, order["id"])
+            except (InsufficientStock, sqlite3.IntegrityError) as failure:
+                error = failure
+            after = {table: store.rows(f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+            current = sales.order(SYSTEM_PRINCIPAL, order["id"])
+            balances = [inventory.balance(SYSTEM_PRINCIPAL, product["id"], "LOC-MAIN-STOCK") for product in products]
+            if mode == "success":
+                assert error is None and current["status"] == "reserved", (mode, error, current)
+                assert [balance["reserved"] for balance in balances] == [2, 3]
+                assert [balance["available"] for balance in balances] == [3, 2]
+                assert len(after["stock_reservations"]) == 2
+            else:
+                expected = InsufficientStock if mode == "shortage" else sqlite3.IntegrityError
+                assert isinstance(error, expected), (mode, error)
+                assert before == after, (mode, "reservation failed with partial persisted state", before, after)
+                assert current["status"] == "confirmed"
+                assert [balance["reserved"] for balance in balances] == [0, 0]
+                if mode == "second_write_failure":
+                    assert "Eval injected second reservation failure" in str(error)
+    return "正式销售两行正常预占、第二行缺货、第二次写入失败均已检查；失败后四表完整不变"
 
 def backup_is_restorable() -> str:
     tmp = tempfile.TemporaryDirectory(prefix="flowerp-eval-backup-")

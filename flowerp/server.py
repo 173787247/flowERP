@@ -120,7 +120,7 @@ def make_handler(app: App):
                     data = file_path.read_bytes(); self.send_response(200)
                     self.send_header("Content-Type", mimetypes.guess_type(file_path)[0] or "application/octet-stream")
                     self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Cache-Control", "no-cache" if file_path.name == "index.html" else "public, max-age=3600")
+                    self.send_header("Cache-Control", "no-cache" if file_path.name in {"index.html", "app.js", "styles.css", "business_date.js"} else "public, max-age=3600")
                     self._security_headers(); self.end_headers(); self.wfile.write(data); return
                 self._json(404, {"error": "not_found"})
             except (KeyError, DomainError, ValueError) as exc:

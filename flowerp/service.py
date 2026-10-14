@@ -312,8 +312,11 @@ class ERPService:
         self, sku: str, quantity: int, reason: str, request_id: str | None = None,
         supplier_id: str | None = None,
     ) -> dict:
-        if quantity <= 0 or not reason.strip():
-            raise ValueError("采购数量和原因不能为空")
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("采购数量必须为正整数")
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("采购理由不能为空")
         sku = sku.upper()
         self.product(sku)
         pid = request_id or f"PR-{uuid.uuid4().hex[:8].upper()}"
@@ -324,7 +327,7 @@ class ERPService:
                 raise NotFound(f"供应商不存在：{supplier_id}")
             conn.execute(
                 "INSERT INTO purchase_requests(id,sku,supplier_id,quantity,status,reason) VALUES(?,?,?,?,?,?)",
-                (pid, sku, supplier_id, quantity, PurchaseStatus.PROPOSED, reason.strip()),
+                (pid, sku, supplier_id, quantity, PurchaseStatus.PROPOSED, reason),
             )
         return self.purchase(pid)
 
@@ -384,22 +387,43 @@ class ERPService:
                 "purchases": {row["status"]: row["count"] for row in purchase_counts}}
 
     def receive_purchase(self, request_id: str, event_key: str) -> dict:
-        item = self.purchase(request_id)
-        if item["status"] == PurchaseStatus.RECEIVED:
-            existing = self.store.row(
-                "SELECT event_key FROM inventory_events WHERE reference=? AND event_type='receive'",
-                (request_id,),
-            )
-            if existing and existing["event_key"] == event_key:
-                result = self.receive_stock(item["sku"], item["quantity"], event_key, reference=request_id)
-                return {"purchase": item, "stock": result}
-            raise InvalidTransition(f"采购 {request_id} 已完成入库")
-        if item["status"] != PurchaseStatus.APPROVED:
-            raise ApprovalRequired(f"采购 {request_id} 未审批，不允许入库")
-        result = self.receive_stock(item["sku"], item["quantity"], event_key, reference=request_id)
         with self.store.connect() as conn:
-            conn.execute(
-                "UPDATE purchase_requests SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (PurchaseStatus.RECEIVED, request_id),
-            )
-        return {"purchase": self.purchase(request_id), "stock": result}
+            conn.execute("BEGIN IMMEDIATE")
+            item = conn.execute("SELECT * FROM purchase_requests WHERE id=?", (request_id,)).fetchone()
+            if not item:
+                raise NotFound(f"采购建议不存在：{request_id}")
+            if item["status"] not in {PurchaseStatus.APPROVED, PurchaseStatus.RECEIVED} or not (
+                item["approved_by"] or ""
+            ).strip():
+                raise ApprovalRequired(f"采购 {request_id} 未审批（需具名审批），不允许入库")
+
+            existing = conn.execute(
+                "SELECT sku,quantity,reserved_delta,event_type,reference FROM inventory_events WHERE event_key=?",
+                (event_key,),
+            ).fetchone()
+            if existing and tuple(existing) != (item["sku"], item["quantity"], 0, "receive", request_id):
+                raise InvalidTransition(f"入库幂等键 {event_key} 已用于其它业务")
+            if item["status"] == PurchaseStatus.RECEIVED and not existing:
+                raise InvalidTransition(f"采购 {request_id} 已完成入库")
+
+            if not existing:
+                conn.execute(
+                    "INSERT INTO inventory_events(event_key,sku,quantity,reserved_delta,event_type,reference) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (event_key, item["sku"], item["quantity"], 0, "receive", request_id),
+                )
+                conn.execute("UPDATE stock SET on_hand=on_hand+? WHERE sku=?", (item["quantity"], item["sku"]))
+            if item["status"] != PurchaseStatus.RECEIVED:
+                conn.execute(
+                    "UPDATE purchase_requests SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (PurchaseStatus.RECEIVED, request_id),
+                )
+            purchase = dict(conn.execute("SELECT * FROM purchase_requests WHERE id=?", (request_id,)).fetchone())
+            result = dict(conn.execute(
+                "SELECT p.*,s.on_hand,s.reserved,(s.on_hand-s.reserved) AS available "
+                "FROM products p JOIN stock s USING(sku) WHERE p.sku=?", (item["sku"],)
+            ).fetchone())
+            result["idempotent_replay"] = bool(existing)
+        if not existing:
+            self._publish_authority(item["sku"])
+        return {"purchase": purchase, "stock": result}

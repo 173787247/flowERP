@@ -6,6 +6,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import date
 from http import HTTPStatus
 from urllib.parse import parse_qs
 from pathlib import Path
@@ -159,7 +160,8 @@ class APIRouter:
             return APIResponse(200, self.health.metrics() + self._runtime_metrics(), content_type="text/plain; version=0.0.4; charset=utf-8")
         if path == "/api/v1/setup/status" and method == "GET":
             count = int(self.store.scalar("SELECT COUNT(*) FROM users") or 0)
-            return APIResponse(200, {"initialized": count > 0, "authentication_required": self.settings.auth_required})
+            return APIResponse(200, {"initialized": count > 0, "authentication_required": self.settings.auth_required,
+                                     "business_date": date.today().isoformat()})
         if path == "/api/v1/setup/bootstrap" and method == "POST":
             result = self.identity.bootstrap(str(data.get("organization_name", "")), str(data.get("username", "")), str(data.get("password", "")))
             return APIResponse(201, {"user": result})

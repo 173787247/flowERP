@@ -149,7 +149,7 @@ class SalesService:
     def order(self, principal: Principal, document_id: str) -> dict:
         principal.require("sales.read")
         header = self.store.row(
-            "SELECT d.*,CASE WHEN d.external_reference LIKE '__internal__:%' THEN '' ELSE d.external_reference END AS external_reference," 
+            "SELECT CASE WHEN substr(d.external_reference,1,13)='__internal__:' THEN '' ELSE d.external_reference END AS external_reference,d.*,"
             "c.code AS customer_code,c.name AS customer_name,c.contact_name,c.phone FROM sales_documents d "
             "JOIN customer_master c ON c.id=d.customer_id WHERE d.id=? AND d.organization_id=?",
             (document_id, principal.organization_id),
@@ -211,7 +211,7 @@ class SalesService:
             filters.append("d.order_date<=?"); params.append(validate_iso_date(until, "结束日期"))
         params.extend((max(1, min(limit, 500)), max(0, offset)))
         return self.store.rows(
-            f"SELECT d.*,CASE WHEN d.external_reference LIKE '__internal__:%' THEN '' ELSE d.external_reference END AS external_reference," 
+            f"SELECT CASE WHEN substr(d.external_reference,1,13)='__internal__:' THEN '' ELSE d.external_reference END AS external_reference,d.*,"
             f"c.code AS customer_code,c.name AS customer_name FROM sales_documents d JOIN customer_master c ON c.id=d.customer_id "
             f"WHERE {' AND '.join(filters)} ORDER BY d.order_date DESC,d.document_number DESC LIMIT ? OFFSET ?", tuple(params),
         )
