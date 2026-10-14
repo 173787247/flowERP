@@ -14,6 +14,13 @@ from flowerp.server import App, make_handler, _structured_log
 
 
 class HTTPAPITests(unittest.TestCase):
+    def test_primary_unhashed_assets_are_revalidated_after_source_changes(self):
+        for path in ('/','/app.js','/styles.css','/static/business_date.js'):
+            with self.subTest(path=path):
+                status,_,headers=self.request('GET',path)
+                self.assertEqual(200,status)
+                self.assertEqual('no-cache',headers['cache-control'])
+
     def test_stale_cookie_is_expired_without_authentication_bypass(self):
         from dataclasses import replace
         self.app.api.settings = replace(self.app.api.settings, auth_required=True)
@@ -115,7 +122,7 @@ class HTTPAPITests(unittest.TestCase):
         self.assertIn('>查看应收票</button>', script)
         self.assertIn('/api/v1/dashboard/trends?months=12', script)
         self.assertIn('id="dashboard-trend-chart"', body)
-        self.assertRegex(body, r'src="\./app\.js\?v=\d+"')
+        self.assertRegex(body, r'src="\./app\.js\?v=(?:\d+|[0-9a-f]{16})"')
         self.assertNotIn('prompt(', script)
         self.assertIn('x.processing_owner||"—"', script)
         self.assertIn('x.lease_expires_at', script)

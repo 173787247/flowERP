@@ -251,6 +251,14 @@ class ImportExportService:
             fieldnames = ["sku", "name", "site", "location", "lot_id", "on_hand", "reserved", "available"]
         elif rows:
             fieldnames = list(rows[0])
+        elif export_type == "products":
+            fieldnames = ["sku", "name", "barcode", "tracking", "sales_price_cents",
+                          "standard_cost_cents", "tax_rate_basis_points", "min_stock",
+                          "max_stock", "active"]
+        elif export_type == "customers":
+            fieldnames = ["code", "name", "contact_name", "phone", "email",
+                          "shipping_address", "payment_terms_days", "credit_limit_cents",
+                          "status"]
         else:
             return ""
         output=io.StringIO(newline="");writer=csv.DictWriter(output,fieldnames=fieldnames);writer.writeheader();writer.writerows(rows)
