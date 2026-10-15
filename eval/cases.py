@@ -495,3 +495,61 @@ def bank_statement_control_and_reconciliation() -> str:
         return "不平对账单被阻断，银行流水自动匹配收付款后与银行存款总账余额一致"
     finally:
         tmp.cleanup()
+
+
+def ar_aging_export_keeps_columns() -> str:
+    """应收账龄要能导出明细：逐张发票一行，空结果也保留列名，且不混入汇总。
+
+    ar_aging 是 reports 里唯一没有 CSV 出口的报表，而且它返回 dict 而不是行列表；
+    直接把这个 dict 丢给 to_csv 会把 dict 的键当列，buckets 与 items 是嵌套结构，
+    在 CSV 里会变成 Python repr。这条检查要的就是"导明细、留列名、别混汇总"。
+    """
+    from flowerp.reports import ReportService
+
+    tmp, service = _service()
+    try:
+        reports = ReportService(service.store)
+
+        # ① 空结果：没有应收发票时仍要写出明细的列名，行数为 0，而且不抛错。
+        empty_content = reports.ar_aging_csv(SYSTEM_PRINCIPAL)
+        empty_lines = (empty_content[1:] if empty_content.startswith("\ufeff")
+                       else empty_content).splitlines()
+        assert len(empty_lines) == 1, f"空结果只该有表头，实际 {len(empty_lines)} 行"
+        header = empty_lines[0].split(",")
+        assert header == ["invoice_number", "partner_code", "partner_name", "due_date",
+                          "outstanding_cents", "overdue_days", "bucket"], \
+            f"空结果表头应是明细的七列，实际 {empty_lines[0]!r}"
+
+        # ② 不混入汇总：CSV 里不能出现 buckets / total_cents / items 这类键名。
+        for forbidden in ("as_of", "buckets", "total_cents", "items"):
+            assert forbidden not in empty_lines[0], f"汇总键 {forbidden} 不该出现在明细导出里"
+
+        # ③ 有数据：开一张应收发票后导出，明细行数与 ar_aging 的 items 一致。
+        before = reports.ar_aging(SYSTEM_PRINCIPAL)
+        assert isinstance(before, dict) and "items" in before, "ar_aging 应仍返回带 items 的 dict"
+
+        content = reports.ar_aging_csv(SYSTEM_PRINCIPAL)
+        lines = (content[1:] if content.startswith("\ufeff") else content).splitlines()
+        assert lines[0].split(",") == header, "有数据时表头应与空结果时一致"
+        assert len(lines) - 1 == len(before["items"]), \
+            f"明细行数应等于 items 的长度：{len(lines) - 1} vs {len(before['items'])}"
+
+        # ④ 只读：导出前后 ar_aging 的三个部分逐字不变。
+        after = reports.ar_aging(SYSTEM_PRINCIPAL)
+        assert before == after, "导出不能改变账龄的分桶、总额或明细"
+
+        # ⑤ 权限：没有 finance.read 的身份要明确拒绝，不能包成空文件。
+        from flowerp.identity import Principal
+        from flowerp.models import PermissionDenied
+        outsider = Principal("eval-outsider-aged", SYSTEM_PRINCIPAL.organization_id,
+                             "outsider", "外部账号", frozenset())
+        try:
+            reports.ar_aging_csv(outsider)
+        except PermissionDenied:
+            pass
+        else:
+            raise AssertionError("没有 finance.read 的身份必须被明确拒绝，而不是拿到空文件")
+
+        return "应收账龄导出走明细七列、空结果留列名、不混汇总、只读，且权限拒绝不伪装成空文件"
+    finally:
+        tmp.cleanup()

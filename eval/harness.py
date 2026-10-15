@@ -41,6 +41,7 @@ EVALS = [
     ("payable_aging_tracks_open_supplier_exposure", "blocking", cases.payable_aging_tracks_open_supplier_exposure),
     ("double_entry_fifo_and_subledger_reconciliation", "blocking", cases.double_entry_fifo_and_subledger_reconciliation),
     ("bank_statement_control_and_reconciliation", "blocking", cases.bank_statement_control_and_reconciliation),
+    ("ar_aging_export_keeps_columns", "blocking", cases.ar_aging_export_keeps_columns),
 ]
 
 

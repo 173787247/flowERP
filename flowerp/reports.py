@@ -9,6 +9,12 @@ from .models import ValidationError, validate_iso_date
 from .store import ERPStore
 
 
+#: 应收账龄导出的明细列。取自 ar_aging 里 items 的字段与它追加的 bucket；
+#: id 与 partner_id 是内部主键，不进面向财务的导出。
+AR_AGING_COLUMNS = ("invoice_number", "partner_code", "partner_name", "due_date",
+                    "outstanding_cents", "overdue_days", "bucket")
+
+
 class ReportService:
     def __init__(self, store: ERPStore) -> None:
         self.store = store
@@ -187,6 +193,21 @@ class ReportService:
             f"LEFT JOIN sites s ON s.id=l.site_id WHERE p.organization_id=? AND p.active=1 AND p.purchasable=1{site_filter} "
             "GROUP BY p.id HAVING projected<=p.min_stock AND suggested_quantity>0 ORDER BY suggested_quantity DESC,p.sku", tuple(params),
         )
+
+    def ar_aging_csv(self, principal: Principal, as_of: str | None = None) -> str:
+        """应收账龄的明细导出：逐张发票一行，空结果也保留列名。
+
+        ar_aging 返回的是带 buckets / total_cents 的汇总结构，直接把它交给 to_csv
+        会把这些键当列，而它们是嵌套结构，在 CSV 里只会变成 Python repr。
+        这里只导明细（items），列规格由本报表自己声明。
+        """
+        report = self.ar_aging(principal, as_of)
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=list(AR_AGING_COLUMNS),
+                                extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(report["items"])
+        return output.getvalue()
 
     @staticmethod
     def to_csv(rows: list[dict]) -> str:
