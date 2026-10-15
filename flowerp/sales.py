@@ -316,6 +316,9 @@ class SalesService:
                     (self._id("RSV"), principal.organization_id, line["product_id"], location_id, lot_id, document_id, line["id"], quantity),
                 )
                 conn.execute("UPDATE sales_document_lines SET reserved_quantity=reserved_quantity+? WHERE id=?", (quantity, line["id"]))
+                # L08 训练用缺陷：逐行提前提交，使第二行失败时第一行已落库（部分预占）。
+                # 这不是产品实现；A/B 用它复现红，C 换回上游的正确实现。
+                conn.commit()
             remaining = conn.execute("SELECT COALESCE(SUM(ordered_quantity-shipped_quantity-reserved_quantity),0) FROM sales_document_lines WHERE document_id=?", (document_id,)).fetchone()[0]
             status = "reserved" if remaining == 0 else "confirmed"
             conn.execute("UPDATE sales_documents SET status=?,updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=?", (status, document_id))
