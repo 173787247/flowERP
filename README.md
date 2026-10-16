@@ -92,6 +92,46 @@ export FLOWERP_AUTH_REQUIRED=true
 
 数据表、模块依赖和旧版 `ERPService` 的兼容边界见[架构与数据设计](docs/architecture.md)。渠道模块提供订单处理与回传任务管理，真实平台适配和联调仍需单独完成。
 
+## 应收账龄导出
+
+财务核销与催收要拿到的是一张张未结发票的明细，不是按账龄分好组的汇总数字，所以要有一个能落到文件的出口。
+
+`ReportService.ar_aging_csv(principal, as_of=None)` 就是这个出口。它把 `ar_aging()` 结果里的 **`items`（逐张发票）** 写成 CSV，列规格由本报表自己声明：
+
+```
+invoice_number, partner_code, partner_name, due_date,
+outstanding_cents, overdue_days, bucket
+```
+
+`id` 与 `partner_id` 是内部主键，不进这份面向财务的导出。
+
+```python
+from flowerp.reports import ReportService
+
+reports = ReportService(store)          # store 是 ERPStore
+csv_text = reports.ar_aging_csv(principal)              # 截止日默认今天
+csv_text = reports.ar_aging_csv(principal, "2026-09-30")  # 指定截止日
+```
+
+### 它守住的四件事
+
+| 行为 | 具体表现 |
+| --- | --- |
+| 只导明细 | CSV 的列就是上面七列，不含 `buckets`、`total_cents` 这类派生汇总 |
+| 空结果仍可用 | 没有应收发票时**仍写出七列表头**、行数为零，不抛异常 |
+| 导出只读 | 导出前后同一发票的未结金额、账龄分桶与明细逐字不变 |
+| 权限不伪装 | 没有 `finance.read` 时**明确拒绝**，不会返回一个空文件冒充成功 |
+
+第三条和第四条是重点。把"没有权限"包装成"空文件"，会把权限问题藏成一个看起来正常的业务结果；`buckets` 与 `total_cents` 是嵌套结构，直接把它们当列写进 CSV，只会得到 Python 的 `repr` 文本，下游读不出来。**需要汇总导出时，那是另一个需求。**
+
+### 怎么检查它
+
+```zsh
+./.venv/bin/python -X utf8 -m eval.harness --suite blocking --case ar_aging_export_keeps_columns
+```
+
+这条检查会自己造场景，覆盖上面四件事加上"有数据时行数等于 `ar_aging()` 的 `items` 长度"。它属于**委托类**检查：工作台仓库（CodexFDE）里有一条同名的包装，通过进程边界把断言交给本仓库执行，所以在那边要显式指定用例名才会跑。
+
 ## 开发与检查
 
 读一项功能时，沿 **`web/app.js` 的请求 → `flowerp/api.py` 的路由 → 对应业务服务 → 表结构与测试** 查找。修改业务规则须包含正常和失败路径测试。
